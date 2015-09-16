@@ -40,6 +40,10 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
     // "OK" status word sent in response to SELECT AID command (0x9000)
     private static final byte[] SELECT_OK_SW = {(byte) 0x90, (byte) 0x00};
 
+    // ISO-DEP command HEADER for selecting an AID.
+    // Format: [Class | Instruction | Parameter 1 | Parameter 2]
+    private static final String INT_AUTH_HEADER = "00880000";
+
     // Weak reference to prevent retain loop. mAccountCallback is responsible for exiting
     // foreground mode before it becomes invalid (e.g. during onPause() or onStop()).
     private WeakReference<AccountCallback> mAccountCallback;
@@ -92,6 +96,21 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
                     // Inform CardReaderFragment of received account number
                     mAccountCallback.get().onAccountReceived(accountNumber);
                 }
+
+                //2nd seq start.
+                byte[] command2 = BuildIntAuthApdu("7788");
+                Log.i(TAG, "Sending Next Seq.");
+                byte[] result2 = isoDep.transceive(command2);
+                Log.i(TAG, "Next Seq Received: result2 " +ByteArrayToHexString(result2));
+                int resultLength2 = result.length;
+                byte[] statusWord2 = {result[resultLength2-2], result[resultLength2-1]};
+                byte[] payload2 = Arrays.copyOf(result2, resultLength2 - 2);
+
+                //new String(statusWord2, "UTF-8");
+                String authNum = new String(payload2, "UTF-8");
+                //Log.i(TAG, "Next Seq Received: statusWord2 " + );
+                Log.i(TAG, "Next Seq Received: payload2 " +authNum);
+
             } catch (IOException e) {
                 Log.e(TAG, "Error communicating with card: " + e.toString());
             }
@@ -108,6 +127,12 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
     public static byte[] BuildSelectApdu(String aid) {
         // Format: [CLASS | INSTRUCTION | PARAMETER 1 | PARAMETER 2 | LENGTH | DATA]
         return HexStringToByteArray(SELECT_APDU_HEADER + String.format("%02X", aid.length() / 2) + aid);
+    }
+
+    public static byte[] BuildIntAuthApdu(String key) {
+        // Format: [CLASS | INSTRUCTION | PARAMETER 1 | PARAMETER 2 | Lc field | DATA | Le field]
+        //see http://www.cardwerk.com/smartcards/smartcard_standard_ISO7816-4_6_basic_interindustry_commands.aspx#chap6_13
+        return HexStringToByteArray(INT_AUTH_HEADER + String.format("%02X", key.length() / 2) + key + "05");
     }
 
     /**
