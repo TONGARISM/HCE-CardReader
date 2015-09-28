@@ -56,7 +56,7 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
             mAccountField = (TextView) v.findViewById(R.id.card_account_field);
             mAccountField.setText("Waiting...");
 
-            mLoyaltyCardReader = new LoyaltyCardReader(this);
+            mLoyaltyCardReader = new LoyaltyCardReader(this, getActivity().getApplicationContext());
 
             // Disable Android Beam and register our card reader callback
             enableReaderMode();

@@ -15,6 +15,8 @@
  */
 package com.example.android.cardreader;
 
+import android.content.Context;
+import android.media.MediaPlayer;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
 import android.nfc.tech.IsoDep;
@@ -24,6 +26,13 @@ import com.example.android.common.logger.Log;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.Arrays;
+import android.os.Handler;
+
+import java.security.NoSuchAlgorithmException;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.security.InvalidKeyException;
 
 /**
  * Callback class, invoked when an NFC card is scanned while the device is running in reader mode.
@@ -44,16 +53,35 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
     // Format: [Class | Instruction | Parameter 1 | Parameter 2]
     private static final String INT_AUTH_HEADER = "00880000";
 
+    // Format: [Class | Instruction | Parameter 1 | Parameter 2]
+    private static final String READ_BIN_HEADER = "00B00000";
+
+    private static final String INT_AUTH_KEY ="7788";
+
+    private static final int READ_BINARY_SIZE = 5;
+
     // Weak reference to prevent retain loop. mAccountCallback is responsible for exiting
     // foreground mode before it becomes invalid (e.g. during onPause() or onStop()).
     private WeakReference<AccountCallback> mAccountCallback;
+
+    private MediaPlayer mMp;
+
+    private final Handler handler = new Handler();
+
+    private final Runnable delayFunc= new Runnable() {
+        @Override
+        public void run() {
+            mMp.start();
+        }
+    };
 
     public interface AccountCallback {
         public void onAccountReceived(String account);
     }
 
-    public LoyaltyCardReader(AccountCallback accountCallback) {
+    public LoyaltyCardReader(AccountCallback accountCallback, Context context) {
         mAccountCallback = new WeakReference<AccountCallback>(accountCallback);
+        mMp = MediaPlayer.create(context, R.raw.tongaroidpay);
     }
 
     /**
@@ -65,6 +93,8 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
      */
     @Override
     public void onTagDiscovered(Tag tag) {
+        String accountNumber = null;
+
         Log.i(TAG, "New tag discovered");
         // Android's Host-based Card Emulation (HCE) feature implements the ISO-DEP (ISO 14443-4)
         // protocol.
@@ -76,6 +106,7 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
             try {
                 // Connect to the remote NFC device
                 isoDep.connect();
+                //---------------1st seq start---------------
                 // Build SELECT AID command for our loyalty card service.
                 // This command tells the remote device which service we wish to communicate with.
                 Log.i(TAG, "Requesting remote AID: " + SAMPLE_LOYALTY_CARD_AID);
@@ -90,27 +121,52 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
                 byte[] statusWord = {result[resultLength-2], result[resultLength-1]};
                 byte[] payload = Arrays.copyOf(result, resultLength-2);
                 if (Arrays.equals(SELECT_OK_SW, statusWord)) {
-                    // The remote NFC device will immediately respond with its stored account number
-                    String accountNumber = new String(payload, "UTF-8");
-                    Log.i(TAG, "Received: " + accountNumber);
-                    // Inform CardReaderFragment of received account number
-                    mAccountCallback.get().onAccountReceived(accountNumber);
+                    accountNumber = new String(payload, "UTF-8");
+                    Log.i(TAG, "Received Account Number: " + accountNumber);
+                    Log.i(TAG, "SelectApdu Received: SELECT_OK_SW");
+                } else {
+                    Log.e(TAG, "SelectApdu Received: UNKNOWN");
+                    return;
                 }
 
-                //2nd seq start.
-                byte[] command2 = BuildIntAuthApdu("7788");
-                Log.i(TAG, "Sending Next Seq.");
-                byte[] result2 = isoDep.transceive(command2);
-                Log.i(TAG, "Next Seq Received: result2 " +ByteArrayToHexString(result2));
-                int resultLength2 = result.length;
-                byte[] statusWord2 = {result[resultLength2-2], result[resultLength2-1]};
-                byte[] payload2 = Arrays.copyOf(result2, resultLength2 - 2);
+                //---------------2nd seq start.---------------
+                byte[] command_auth = BuildIntAuthApdu(INT_AUTH_KEY);
+                Log.i(TAG, "Sending: " + ByteArrayToHexString(command_auth));
+                byte[] result_auth = isoDep.transceive(command_auth);
+                Log.i(TAG, "INT Auth Seq Received:" +ByteArrayToHexString(result_auth));
+                int resultLength_auth = result_auth.length;
+                byte[] statusWord_auth = {result_auth[resultLength_auth-2], result_auth[resultLength_auth-1]};
+                byte[] payload2 = Arrays.copyOf(result_auth, resultLength_auth - 2);
 
-                //new String(statusWord2, "UTF-8");
                 String authNum = new String(payload2, "UTF-8");
-                //Log.i(TAG, "Next Seq Received: statusWord2 " + );
-                Log.i(TAG, "Next Seq Received: payload2 " +authNum);
+                Log.i(TAG, "INT Auth Seq Received: payload:" + authNum);
 
+                //---------------3rd seq start.---------------
+                byte[] command_bin = BuildReadBinaryApdu(READ_BINARY_SIZE);
+                // Send command to remote device
+                Log.i(TAG, "Sending: " + ByteArrayToHexString(command_bin));
+                byte[] result_bin = isoDep.transceive(command_bin);
+                Log.i(TAG, "Read Binary Received:" +ByteArrayToHexString(result_bin));
+                // If AID is successfully selected, 0x9000 is returned as the status word (last 2
+                // bytes of the result) by convention. Everything before the status word is
+                // optional payload.
+                int resultLength_bin = result_bin.length;
+                byte[] statusWord_bin = {result_bin[resultLength_bin-2], result_bin[resultLength_bin-1]};
+                byte[] payload_bin = Arrays.copyOf(result_bin, resultLength_bin-2);
+                if (Arrays.equals(SELECT_OK_SW, statusWord_bin)) {
+                    String authVal =ByteArrayToHexString(payload_bin);
+                    Log.i(TAG, "authVal:" + authVal);
+
+                    byte[] comparison = calcHmac(INT_AUTH_KEY, accountNumber);
+                    String compVal = ByteArrayToHexString(Arrays.copyOfRange(comparison, 0, READ_BINARY_SIZE));
+                    if( compVal.equals(authVal)) {
+                        Log.i(TAG, "Comparison OK.");
+                        // Inform CardReaderFragment of received account number
+                        mAccountCallback.get().onAccountReceived(accountNumber);
+                        //play sound
+                        handler.postDelayed(delayFunc, 150);
+                    }
+                }
             } catch (IOException e) {
                 Log.e(TAG, "Error communicating with card: " + e.toString());
             }
@@ -135,6 +191,35 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
         return HexStringToByteArray(INT_AUTH_HEADER + String.format("%02X", key.length() / 2) + key + "05");
     }
 
+    public static byte[] BuildReadBinaryApdu(int len) {
+        // Format: [CLASS | INSTRUCTION | PARAMETER 1 | PARAMETER 2 | Lc field | DATA | Le field]
+        //see http://www.cardwerk.com/smartcards/smartcard_standard_ISO7816-4_6_basic_interindustry_commands.aspx#chap6_1
+        return HexStringToByteArray(READ_BIN_HEADER + "00" + "00" + String.format("%02X", len));
+    }
+
+    static byte[] calcHmac(String key, String str){
+        String ALGORISM = "hmacSHA256";
+        //String key = "key";
+        //String str ="012345";
+        byte[] result =null;
+
+        SecretKeySpec secretKeySpec = new SecretKeySpec(key.getBytes(), ALGORISM);
+        try {
+            Mac mac = Mac.getInstance(ALGORISM);
+            mac.init(secretKeySpec);
+            result = mac.doFinal(str.getBytes());
+            Log.i(TAG, "HMAC:"+str + " "+ALGORISM+ " -> " + ByteArrayToHexString(result));
+
+        }
+        catch (NoSuchAlgorithmException e) {
+            Log.i(TAG, "HMAC:NoSuchAlgorithmException:" + ALGORISM);
+        }
+        catch (InvalidKeyException e) {
+            Log.i(TAG, "HMAC:InvalidKeyException:" + key);
+        }
+
+        return result;
+    }
     /**
      * Utility class to convert a byte array to a hexadecimal string.
      *
