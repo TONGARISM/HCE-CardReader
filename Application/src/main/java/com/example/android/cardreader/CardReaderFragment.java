@@ -23,6 +23,9 @@ import android.support.v4.app.Fragment;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.animation.Animation;
+import android.view.animation.AnimationUtils;
+import android.widget.ImageView;
 import android.widget.TextView;
 
 import com.example.android.common.logger.Log;
@@ -41,6 +44,7 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
     public LoyaltyCardReader mLoyaltyCardReader;
     private TextView mAccountField;
 
+    private View mView=null;
     /** Called when sample is created. Displays generic UI with welcome text. */
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -58,6 +62,7 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
 
             mLoyaltyCardReader = new LoyaltyCardReader(this, getActivity().getApplicationContext());
 
+            mView = v;
             // Disable Android Beam and register our card reader callback
             enableReaderMode();
         }
@@ -103,6 +108,12 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
             @Override
             public void run() {
                 mAccountField.setText(account);
+                //start animation
+                if(mView!=null){
+                    ImageView image = (ImageView) mView.findViewById(R.id.card_imagearea);
+                    Animation hyperspaceJump = AnimationUtils.loadAnimation( getActivity().getApplicationContext(), R.anim.hyperspace_jump);
+                    image.startAnimation(hyperspaceJump);
+                }
             }
         });
     }
