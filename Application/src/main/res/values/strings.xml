@@ -16,6 +16,6 @@ limitations under the License.
 -->
 
 <resources>
-    <string name="card_title">Sample Loyalty Card</string>
+    <string name="card_title">Tongaroid Pay</string>
     <string name="account_number">Account Number</string>
 </resources>

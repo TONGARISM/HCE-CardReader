@@ -16,10 +16,13 @@
 package com.example.android.cardreader;
 
 import android.content.Context;
+import android.database.Cursor;
+import android.graphics.Point;
 import android.media.MediaPlayer;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
 import android.nfc.tech.IsoDep;
+import android.content.ContentValues;
 
 import com.example.android.common.logger.Log;
 
@@ -33,6 +36,7 @@ import java.security.NoSuchAlgorithmException;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.security.InvalidKeyException;
+import java.util.Random;
 
 /**
  * Callback class, invoked when an NFC card is scanned while the device is running in reader mode.
@@ -56,15 +60,25 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
     // Format: [Class | Instruction | Parameter 1 | Parameter 2]
     private static final String READ_BIN_HEADER = "00B00000";
 
+    private static final String WRITE_BIN_HEADER = "00D00000";
+
     private static final String INT_AUTH_KEY ="7788";
 
     private static final int READ_BINARY_SIZE = 5;
+    private static final int WRITE_BINARY_SIZE = 12;
+
+    private static final String WRITE_TOKEN = "AA";
+    private static final String WRITE_POINT = "BB";
+
+    private PointDB mPointDB;
 
     // Weak reference to prevent retain loop. mAccountCallback is responsible for exiting
     // foreground mode before it becomes invalid (e.g. during onPause() or onStop()).
     private WeakReference<AccountCallback> mAccountCallback;
 
     private MediaPlayer mMp;
+
+    private Context mContext;
 
     private final Handler handler = new Handler();
 
@@ -76,12 +90,16 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
     };
 
     public interface AccountCallback {
-        public void onAccountReceived(String account);
+        public void onAccountReceived(String account, int type);
     }
 
     public LoyaltyCardReader(AccountCallback accountCallback, Context context) {
         mAccountCallback = new WeakReference<AccountCallback>(accountCallback);
-        mMp = MediaPlayer.create(context, R.raw.tongaroidpay);
+        mContext = context;
+    }
+
+    public void createPointDB() {
+        mPointDB = new PointDB(mContext);
     }
 
     /**
@@ -93,7 +111,7 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
      */
     @Override
     public void onTagDiscovered(Tag tag) {
-        String accountNumber = null;
+        String receiveNumber = null;
 
         Log.i(TAG, "New tag discovered");
         // Android's Host-based Card Emulation (HCE) feature implements the ISO-DEP (ISO 14443-4)
@@ -121,15 +139,50 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
                 byte[] statusWord = {result[resultLength-2], result[resultLength-1]};
                 byte[] payload = Arrays.copyOf(result, resultLength-2);
                 if (Arrays.equals(SELECT_OK_SW, statusWord)) {
-                    accountNumber = new String(payload, "UTF-8");
-                    Log.i(TAG, "Received Account Number: " + accountNumber);
+                    //accountNumber = new String(payload, "UTF-8");
+                    receiveNumber = ByteArrayToHexString(payload);
+                    Log.i(TAG, "Received TOKEN: " + receiveNumber);
                     Log.i(TAG, "SelectApdu Received: SELECT_OK_SW");
+
+                    //tokenがDB存在するか、検索
+                    Cursor cursor = mPointDB.query(PointDB.TABLE_TITLE, null, PointDB.COLUMN_TOKEN+"=?", new String[]{receiveNumber});
+
+                    //DBに存在する(既に登録済みユーザであれば、ポイント更新)
+                    if(cursor.moveToFirst()) {
+                        Log.d(TAG, "known Account!!!");
+                        //ポイント10加算
+                        String point = cursor.getString(cursor.getColumnIndex(PointDB.COKUMN_POINT));
+                        point = String.valueOf(Integer.parseInt(point) + 10);
+                        String sendPoint = String.valueOf(String.format("%1$012d", Integer.parseInt(point)));
+
+                        //データベース更新
+                        ContentValues values = new ContentValues();
+                        values.put(PointDB.COKUMN_POINT, sendPoint);
+                        mPointDB.update(PointDB.TABLE_TITLE, values, PointDB.COLUMN_TOKEN+" = ?", new String[]{receiveNumber});
+                        values.clear();
+                        //ポイント残高送信
+                        byte[] command_bin = BuildWriteBinaryAdpu(WRITE_BINARY_SIZE, point, WRITE_POINT);
+                        Log.i(TAG, "Sending: " + ByteArrayToHexString(command_bin));
+                        byte[] result_bin = isoDep.transceive(command_bin);
+                        Log.i(TAG, "Write Binary Received:" +ByteArrayToHexString(result_bin));
+                        int resultLength_bin = result_bin.length;
+                        byte[] statusWord_bin = {result_bin[resultLength_bin-2], result_bin[resultLength_bin-1]};
+                        if (Arrays.equals(SELECT_OK_SW, statusWord_bin)) {
+                            //ポイント残高表示＋効果音
+                            mAccountCallback.get().onAccountReceived("Point : "+point, 2);
+                            mMp = MediaPlayer.create(mContext, R.raw.tongaroidpay);
+                            handler.postDelayed(delayFunc, 150);
+                        }
+                        return;
+
+                    }
                 } else {
                     Log.e(TAG, "SelectApdu Received: UNKNOWN");
                     return;
                 }
 
                 //---------------2nd seq start.---------------
+                //登録シーケンス
                 byte[] command_auth = BuildIntAuthApdu(INT_AUTH_KEY);
                 Log.i(TAG, "Sending: " + ByteArrayToHexString(command_auth));
                 byte[] result_auth = isoDep.transceive(command_auth);
@@ -137,36 +190,37 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
                 int resultLength_auth = result_auth.length;
                 byte[] statusWord_auth = {result_auth[resultLength_auth-2], result_auth[resultLength_auth-1]};
                 byte[] payload2 = Arrays.copyOf(result_auth, resultLength_auth - 2);
+                String token ="";
 
-                String authNum = new String(payload2, "UTF-8");
-                Log.i(TAG, "INT Auth Seq Received: payload:" + authNum);
+                String hash = ByteArrayToHexString(payload2);
+                Log.i(TAG, "INT Auth Seq Received: payload:" + hash);
+
+                if (Arrays.equals(SELECT_OK_SW, statusWord_auth)) {
+                    //トークン生成
+                    token = createToken(hash);
+                }
 
                 //---------------3rd seq start.---------------
-                byte[] command_bin = BuildReadBinaryApdu(READ_BINARY_SIZE);
-                // Send command to remote device
+                byte[] command_bin = BuildWriteBinaryAdpu(WRITE_BINARY_SIZE, token, WRITE_TOKEN);
                 Log.i(TAG, "Sending: " + ByteArrayToHexString(command_bin));
                 byte[] result_bin = isoDep.transceive(command_bin);
-                Log.i(TAG, "Read Binary Received:" +ByteArrayToHexString(result_bin));
-                // If AID is successfully selected, 0x9000 is returned as the status word (last 2
-                // bytes of the result) by convention. Everything before the status word is
-                // optional payload.
+                Log.i(TAG, "Write Binary Received:" +ByteArrayToHexString(result_bin));
                 int resultLength_bin = result_bin.length;
                 byte[] statusWord_bin = {result_bin[resultLength_bin-2], result_bin[resultLength_bin-1]};
-                byte[] payload_bin = Arrays.copyOf(result_bin, resultLength_bin-2);
                 if (Arrays.equals(SELECT_OK_SW, statusWord_bin)) {
-                    String authVal =ByteArrayToHexString(payload_bin);
-                    Log.i(TAG, "authVal:" + authVal);
-
-                    byte[] comparison = calcHmac(INT_AUTH_KEY, accountNumber);
-                    String compVal = ByteArrayToHexString(Arrays.copyOfRange(comparison, 0, READ_BINARY_SIZE));
-                    if( compVal.equals(authVal)) {
-                        Log.i(TAG, "Comparison OK.");
-                        // Inform CardReaderFragment of received account number
-                        mAccountCallback.get().onAccountReceived(accountNumber);
-                        //play sound
-                        handler.postDelayed(delayFunc, 150);
-                    }
+                    Log.i(TAG, "Write Binary Received: SELECT_OK_SW");
+                    ContentValues values = new ContentValues();
+                    values.put(PointDB.COLUMM_HASH, hash);
+                    values.put(PointDB.COLUMN_TOKEN, token);
+                    values.put(PointDB.COKUMN_POINT, "10");
+                    mPointDB.insert(values);
+                    values.clear();
                 }
+                //登録完了表示+効果音
+                mAccountCallback.get().onAccountReceived("Completed.", 1);
+                mMp = MediaPlayer.create(mContext, R.raw.touroku);
+                handler.postDelayed(delayFunc, 150);
+
             } catch (IOException e) {
                 Log.e(TAG, "Error communicating with card: " + e.toString());
             }
@@ -195,6 +249,13 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
         // Format: [CLASS | INSTRUCTION | PARAMETER 1 | PARAMETER 2 | Lc field | DATA | Le field]
         //see http://www.cardwerk.com/smartcards/smartcard_standard_ISO7816-4_6_basic_interindustry_commands.aspx#chap6_1
         return HexStringToByteArray(READ_BIN_HEADER + "00" + "00" + String.format("%02X", len));
+    }
+
+    public static byte[] BuildWriteBinaryAdpu(int len, String token, String type) {
+        // Format: [CLASS | INSTRUCTION | PARAMETER 1 | PARAMETER 2 | Lc field | DATA | Le field]
+        //see http://www.cardwerk.com/smartcards/smartcard_standard_ISO7816-4_6_basic_interindustry_commands.aspx#chap6_1
+        //return HexStringToByteArray(WRITE_BIN_HEADER + type + String.format("%02X", len/2) + token);
+        return HexStringToByteArray(WRITE_BIN_HEADER + type + token);
     }
 
     static byte[] calcHmac(String key, String str){
@@ -254,6 +315,29 @@ public class LoyaltyCardReader implements NfcAdapter.ReaderCallback {
                     + Character.digit(s.charAt(i+1), 16));
         }
         return data;
+    }
+
+    /**トークン生成関数**/
+    private String createToken(String hash_org) {
+        int token;
+        String hash_ini, hash_end, hash_token;
+        int randLength = 6;
+
+        //先頭と末尾の3文字を除いた中間の数字をトークンに置き換える
+        hash_ini = hash_org.substring(0,3);
+        hash_end = hash_org.substring(hash_org.length()-3);
+        hash_token = hash_org.substring(3,hash_org.length()-3);
+        Log.d(TAG, hash_org + "\n" + hash_ini + "\n" + hash_end);
+
+
+        String strRand = new String();
+        Random rnd = new Random();
+        for(int i=0; i<randLength; i++){
+            strRand += String.valueOf(rnd.nextInt(10));
+        }
+        Log.d(TAG, hash_ini+strRand+hash_end);
+
+        return hash_ini+strRand+hash_end;
     }
 
 }

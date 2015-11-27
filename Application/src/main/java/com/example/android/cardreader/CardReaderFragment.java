@@ -45,6 +45,9 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
     private TextView mAccountField;
 
     private View mView=null;
+
+    private final int TOUROKU = 1;
+    private final int ZANDAKA = 2;
     /** Called when sample is created. Displays generic UI with welcome text. */
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -89,6 +92,7 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
         if (nfc != null) {
             nfc.enableReaderMode(activity, mLoyaltyCardReader, READER_FLAGS, null);
         }
+        mLoyaltyCardReader.createPointDB();
     }
 
     private void disableReaderMode() {
@@ -101,7 +105,7 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
     }
 
     @Override
-    public void onAccountReceived(final String account) {
+    public void onAccountReceived(final String account, final int type) {
         // This callback is run on a background thread, but updates to UI elements must be performed
         // on the UI thread.
         getActivity().runOnUiThread(new Runnable() {
@@ -110,7 +114,17 @@ public class CardReaderFragment extends Fragment implements LoyaltyCardReader.Ac
                 mAccountField.setText(account);
                 //start animation
                 if(mView!=null){
+                    TextView text = (TextView)mView.findViewById(R.id.card_account_label);
+                    if(type == TOUROKU) {
+                        text.setText("Registration of new user");
+                    }
+                    else if(type == ZANDAKA) {
+                        text.setText("TONGARI Points");
+                    }
                     ImageView image = (ImageView) mView.findViewById(R.id.card_imagearea);
+
+
+
                     Animation hyperspaceJump = AnimationUtils.loadAnimation( getActivity().getApplicationContext(), R.anim.hyperspace_jump);
                     image.startAnimation(hyperspaceJump);
                 }
